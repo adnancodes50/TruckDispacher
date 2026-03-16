@@ -14,8 +14,8 @@ class ReviewController extends Controller
 
 public function store(Request $request, $jobId)
 {
+    // $user = $request->user();
     $user = $request->user();
-
     // Only broker can give review
     if ($user->role !== 'broker') {
         return response()->json([
