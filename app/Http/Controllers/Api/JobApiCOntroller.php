@@ -21,7 +21,6 @@ class JobApiController extends Controller
 {
     public function createJob(Request $request)
     {
-        // $user = $request->user();
         $user = $request->user();
 
         // only broker allowed
