@@ -150,7 +150,6 @@ class JobApiController extends Controller
         }
 
         $job = Job::find($jobId);
-
         if (! $job) {
             return response()->json([
                 'status' => false,
@@ -184,7 +183,6 @@ class JobApiController extends Controller
 
         // Increase driver's active request count
         $user->increment('active_requests_count');
-
         // Notify broker
         // Notify broker in database
         Notification::create([
