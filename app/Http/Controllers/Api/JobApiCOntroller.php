@@ -3,17 +3,16 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Services\OneSignalService;
-use App\Models\User;
 use App\Models\Job;
 use App\Models\JobRequest;
 use App\Models\Notification;
+use App\Models\User;
+use App\Services\OneSignalService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Validator;
-
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Validator;
 
 // use Illuminate\Support\Facades\Validator;
 
@@ -188,37 +187,37 @@ class JobApiController extends Controller
 
         // Notify broker
         // Notify broker in database
-Notification::create([
-    'user_id' => $job->broker_id,
-    'type' => 'job_request',
-    'title' => 'New Job Request',
-    'body' => $user->full_name . ' requested your job',
-    'data' => json_encode([
-        'job_id' => $job->id,
-        'driver_id' => $user->id,
-        'job_request_id' => $jobRequest->id,
-    ]),
-    'created_at' => now(),
-]);
+        Notification::create([
+            'user_id' => $job->broker_id,
+            'type' => 'job_request',
+            'title' => 'New Job Request',
+            'body' => $user->full_name.' requested your job',
+            'data' => json_encode([
+                'job_id' => $job->id,
+                'driver_id' => $user->id,
+                'job_request_id' => $jobRequest->id,
+            ]),
+            'created_at' => now(),
+        ]);
 
-// Send push notification using OneSignal
-$broker = User::find($job->broker_id);
+        // Send push notification using OneSignal
+        $broker = User::find($job->broker_id);
 
-if ($broker && $broker->fcm_token) {
+        if ($broker && $broker->fcm_token) {
 
-    $oneSignal = new OneSignalService();
+            $oneSignal = new OneSignalService;
 
-    $oneSignal->sendNotification(
-        $broker->fcm_token,
-        "New Job Request",
-        $user->full_name . " requested your job: " . $job->title,
-        [
-            "job_id" => $job->id,
-            "driver_id" => $user->id,
-            "job_request_id" => $jobRequest->id
-        ]
-    );
-}
+            $oneSignal->sendNotification(
+                $broker->fcm_token,
+                'New Job Request',
+                $user->full_name.' requested your job: '.$job->title,
+                [
+                    'job_id' => $job->id,
+                    'driver_id' => $user->id,
+                    'job_request_id' => $jobRequest->id,
+                ]
+            );
+        }
 
         return response()->json([
             'status' => true,
@@ -272,103 +271,103 @@ if ($broker && $broker->fcm_token) {
 
     // accept job request
 
-public function acceptJobRequest(Request $request, $requestId)
-{
-    $user = $request->user();
+    public function acceptJobRequest(Request $request, $requestId)
+    {
+        $user = $request->user();
 
-    // Only broker allowed
-    if ($user->role !== 'broker') {
-        return response()->json([
-            'status' => false,
-            'message' => 'Only brokers can accept job requests'
-        ], 403);
-    }
-
-    $jobRequest = JobRequest::find($requestId);
-
-    if (!$jobRequest) {
-        return response()->json([
-            'status' => false,
-            'message' => 'Job request not found'
-        ], 404);
-    }
-
-    $job = Job::find($jobRequest->job_id);
-
-    DB::beginTransaction();
-
-    try {
-
-        // Update job request
-        $jobRequest->status = 'assigned';
-        $jobRequest->responded_at = now();
-        $jobRequest->save();
-
-        // Update job
-        $job->driver_id = $jobRequest->driver_id;
-        $job->status = 'assigned';
-        $job->save();
-
-        // Delete other requests
-        JobRequest::where('job_id', $job->id)
-            ->where('id', '!=', $jobRequest->id)
-            ->delete();
-
-        DB::commit();
-
-        /*
-        |--------------------------------------------------------------------------
-        | Send notification to driver
-        |--------------------------------------------------------------------------
-        */
-
-        $driver = User::find($jobRequest->driver_id);
-
-        if ($driver && $driver->fcm_token) {
-
-            $oneSignal = new OneSignalService();
-
-            $response = $oneSignal->sendNotification(
-                $driver->fcm_token,
-                "Job Accepted",
-                "Your request for job '{$job->title}' has been accepted",
-                [
-                    "job_id" => $job->id,
-                    "status" => "assigned"
-                ]
-            );
-
-            // Log response
-            Log::info('Driver Notification Sent', [
-                'driver_id' => $driver->id,
-                'player_id' => $driver->fcm_token,
-                'response' => $response
-            ]);
+        // Only broker allowed
+        if ($user->role !== 'broker') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only brokers can accept job requests',
+            ], 403);
         }
 
-        return response()->json([
-            'status' => true,
-            'message' => 'Job assigned successfully',
-            'job' => [
-                'job_id' => $job->id,
-                'full_name'=>$job->full_name,
-                'driver_id' => $job->driver_id,
-                'status' => $job->status
-            ]
-        ]);
+        $jobRequest = JobRequest::find($requestId);
 
-    } catch (\Exception $e) {
+        if (! $jobRequest) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Job request not found',
+            ], 404);
+        }
 
-        DB::rollback();
+        $job = Job::find($jobRequest->job_id);
 
-        Log::error('Job Accept Error', [
-            'error' => $e->getMessage()
-        ]);
+        DB::beginTransaction();
 
-        return response()->json([
-            'status' => false,
-            'message' => $e->getMessage()
-        ], 500);
+        try {
+
+            // Update job request
+            $jobRequest->status = 'assigned';
+            $jobRequest->responded_at = now();
+            $jobRequest->save();
+
+            // Update job
+            $job->driver_id = $jobRequest->driver_id;
+            $job->status = 'assigned';
+            $job->save();
+
+            // Delete other requests
+            JobRequest::where('job_id', $job->id)
+                ->where('id', '!=', $jobRequest->id)
+                ->delete();
+
+            DB::commit();
+
+            /*
+            |--------------------------------------------------------------------------
+            | Send notification to driver
+            |--------------------------------------------------------------------------
+            */
+
+            $driver = User::find($jobRequest->driver_id);
+
+            if ($driver && $driver->fcm_token) {
+
+                $oneSignal = new OneSignalService;
+
+                $response = $oneSignal->sendNotification(
+                    $driver->fcm_token,
+                    'Job Accepted',
+                    "Your request for job '{$job->title}' has been accepted",
+                    [
+                        'job_id' => $job->id,
+                        'status' => 'assigned',
+                    ]
+                );
+
+                // Log response
+                Log::info('Driver Notification Sent', [
+                    'driver_id' => $driver->id,
+                    'player_id' => $driver->fcm_token,
+                    'response' => $response,
+                ]);
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Job assigned successfully',
+                'job' => [
+                    'job_id' => $job->id,
+                    'full_name' => $job->full_name,
+                    'driver_id' => $job->driver_id,
+                    'status' => $job->status,
+                ],
+            ]);
+
+        } catch (\Exception $e) {
+
+            DB::rollback();
+
+            Log::error('Job Accept Error', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => $e->getMessage(),
+            ], 500);
+        }
     }
-}
 }

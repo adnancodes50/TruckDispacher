@@ -26,12 +26,12 @@ class OneSignalService
         $appId = trim($this->appId);
         $apiKey = trim($this->apiKey);
 
-        Log::info('OneSignal Debug', [
-            'app_id_length' => strlen($appId),
-            'api_key_length' => strlen($apiKey),
-            'target' => $target,
-            'is_topic' => $isTopic
-        ]);
+        // Log::info('OneSignal Debug', [
+        //     'app_id_length' => strlen($appId),
+        //     'api_key_length' => strlen($apiKey),
+        //     'target' => $target,
+        //     'is_topic' => $isTopic
+        // ]);
 
         $payload = [
             'app_id' => $appId,

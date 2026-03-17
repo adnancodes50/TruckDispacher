@@ -16,7 +16,7 @@
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 
     <!-- Favicon -->
-    <link rel="icon" type="image/jpeg" href="{{ asset('images/logo.jpg') }}">
+    <link rel="icon" type="image/jpeg" href="{{ asset('images/shiping_icon1.png') }}">
 </head>
 
 <body class="font-sans antialiased bg-brand-teal">
@@ -26,7 +26,7 @@
         <!-- Logo -->
         <div class="mb-4">
             <a href="/">
-                <img src="{{ asset('images/logo.jpg') }}"
+                <img src="{{ asset('images/shiping_icon1.png') }}"
                      alt="Truck Dispatch Logo"
                      class="w-24 h-24 object-contain">
             </a>

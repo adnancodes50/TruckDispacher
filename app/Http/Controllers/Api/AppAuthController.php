@@ -79,88 +79,84 @@ class AppAuthController extends Controller
 
     // broker registerration api method
 
-    public function registerBroker(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'full_name' => 'required|string|max:255',
-            'company_name' => 'required|string|max:255',
-            'email' => 'required|email|unique:users,email',
-            'phone' => 'required|string|max:20',
-            'password' => 'required|min:6|confirmed',
-        ]);
+   public function registerBroker(Request $request)
+{
+    $validator = Validator::make($request->all(), [
+        'full_name' => 'required|string|max:255',
+        'company_name' => 'required|string|max:255',
+        'email' => 'required|email|unique:users,email',
+        'phone' => 'required|string|max:20',
+        'password' => 'required|min:6|confirmed',
+    ]);
 
-        if ($validator->fails()) {
-            return response()->json([
-                'status' => false,
-                'message' => $validator->errors(),
-            ], 422);
-        }
-
-        $user = User::create([
-            'role' => 'broker',
-            'full_name' => $request->full_name,
-            'company_name' => $request->company_name,
-            'email' => $request->email,
-            'phone' => $request->phone,
-            'password' => Hash::make($request->password),
-        ]);
-
-        // $token = $user->createToken('auth_token')->plainTextToken;
-        // 'token' => $token,
+    if ($validator->fails()) {
         return response()->json([
-            'status' => true,
-            'message' => 'Broker registered successfully',
-            'email' => $user->email,
-            'role' => $user->role,
-            'name' => $user->full_name,
-            'company_name' => $user->company_name,
-        ]);
+            'status' => false,
+            'message' => $validator->errors(),
+        ], 422);
     }
+
+    $user = User::create([
+        'role' => 'broker',
+        'full_name' => $request->full_name,
+        'company_name' => $request->company_name,
+        'email' => $request->email,
+        'phone' => $request->phone,
+        'password' => Hash::make($request->password),
+    ]);
+
+    return response()->json([
+        'status' => true,
+        'message' => 'Registered successfully',
+        'data' => $user
+    ]);
+}
 
     public function registerDriver(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'full_name' => 'required|string|max:255',
-            'email' => 'required|email|unique:users,email',
-            'phone' => 'required|string|max:20',
-            'password' => 'required|min:6|confirmed',
-            'license_number' => 'required|string|max:255',
-            'truck_info' => 'required|string|max:255',
-            'truck_type' => 'required|string|max:255',
-            'truck_plate' => 'required|string|max:255',
-        ]);
+{
+    $validator = Validator::make($request->all(), [
+        'full_name' => 'required|string|max:255',
+        'email' => 'required|email|unique:users,email',
+        'phone' => 'required|string|max:20',
+        'password' => 'required|min:6|confirmed',
+        'license_number' => 'required|string|max:255',
 
-        if ($validator->fails()) {
-            return response()->json([
-                'status' => false,
-                'message' => $validator->errors(),
-            ], 422);
-        }
+        // OPTIONAL FIELDS 👇
+        'truck_info' => 'nullable|string|max:255',
+        'truck_type' => 'nullable|string|max:255',
+        'truck_plate' => 'nullable|string|max:255',
+    ]);
 
-        $driver = User::create([
-            'role' => 'driver',
-            'full_name' => $request->full_name,
-            'email' => $request->email,
-            'phone' => $request->phone,
-            'password' => Hash::make($request->password),
-            'license_number' => $request->license_number,
-            'truck_info' => $request->truck_info,
-            'truck_type' => $request->truck_type,
-            'truck_plate' => $request->truck_plate,
-        ]);
-
-        // $token = $driver->createToken('auth_token')->plainTextToken;
-
+    if ($validator->fails()) {
         return response()->json([
-            'status' => true,
-            'message' => 'Driver registered successfully',
-            // 'token' => $token,
-            'email' => $driver->email,
-            'role' => $driver->role,
-            'name' => $driver->full_name,
-            'truck_info' => $driver->truck_info,
-        ]);
+            'status' => false,
+            'message' => $validator->errors(),
+        ], 422);
     }
+
+    $driver = User::create([
+        'role' => 'driver',
+        'full_name' => $request->full_name,
+        'email' => $request->email,
+        'phone' => $request->phone,
+        'password' => Hash::make($request->password),
+        'license_number' => $request->license_number,
+
+        // OPTIONAL (will store null if not provided)
+        'truck_info' => $request->truck_info,
+        'truck_type' => $request->truck_type,
+        'truck_plate' => $request->truck_plate,
+    ]);
+
+    return response()->json([
+        'status' => true,
+        'message' => 'Driver registered successfully',
+        'email' => $driver->email,
+        'role' => $driver->role,
+        'name' => $driver->full_name,
+        'truck_info' => $driver->truck_info,
+    ]);
+}
 
     public function logout(Request $request)
     {

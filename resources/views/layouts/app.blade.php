@@ -23,7 +23,7 @@
     @vite(['resources/css/app.css', 'resources/js/app.js'])
 
     <!-- Favicon -->
-    <link rel="icon" type="image/jpeg" href="{{ asset('images/logo.jpg') }}">
+    <link rel="icon" type="image/jpeg" href="{{ asset('images/shiping_icon1.png') }}">
 </head>
 
 <body class="font-sans antialiased bg-slate-50">
