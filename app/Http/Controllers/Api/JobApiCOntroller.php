@@ -225,7 +225,7 @@ class JobApiController extends Controller
                 'job_id' => $jobRequest->job_id,
                 'driver_id' => $jobRequest->driver_id,
                 'status' => $jobRequest->status,
-                'expires_at' => $expiresAt,
+                // 'expires_at' => $expiresAt,
             ],
         ]);
     }
