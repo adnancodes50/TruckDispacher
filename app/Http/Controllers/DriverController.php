@@ -28,7 +28,7 @@ class DriverController extends Controller
                 });
             })
             ->latest()
-            ->paginate(10);
+            ->get();
 
         return view('drivers.index', compact('drivers', 'search'));
     }

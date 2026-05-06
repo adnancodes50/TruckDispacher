@@ -42,6 +42,7 @@ class User extends Authenticatable
         'average_rating',
         'total_reviews',
         'user_image',
+        'onesignal_player_id',
     ];
 
     /**

@@ -14,6 +14,10 @@ Route::get('/', function () {
     return view('auth.login');
 })->middleware('guest')->name('login');
 
+Route::get('/reset-password', function () {
+    return view('reset-password');
+})->middleware('guest')->name('password.reset');
+
 Route::middleware(['auth'])->group(function () {
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
