@@ -265,11 +265,27 @@ class JobApiController extends Controller
         }
     }
 
+    private function calculateMiles($lat1, $lon1, $lat2, $lon2)
+    {
+        $earthRadius = 3959; // Miles
+
+        $latDelta = deg2rad($lat2 - $lat1);
+        $lonDelta = deg2rad($lon2 - $lon1);
+
+        $a = sin($latDelta / 2) * sin($latDelta / 2) +
+            cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
+            sin($lonDelta / 2) * sin($lonDelta / 2);
+
+        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+
+        return round($earthRadius * $c, 2);
+    }
+
     public function brokerJobs(Request $request)
     {
         $user = $request->user();
 
-        // only broker allowed
+        // 🔐 Only broker allowed
         if ($user->role !== 'broker') {
             return response()->json([
                 'status' => false,
@@ -277,9 +293,41 @@ class JobApiController extends Controller
             ], 403);
         }
 
+        // 📦 Get jobs
         $jobs = Job::where('broker_id', $user->id)
             ->latest()
             ->get();
+
+        /*
+        |--------------------------------------------------------------------------
+        | 🚚 Calculate Miles
+        |--------------------------------------------------------------------------
+        */
+        $jobs = $jobs->map(function ($job) {
+
+            $miles = null;
+
+            // ✅ Check coordinates exist
+            if (
+                $job->pickup_lat &&
+                $job->pickup_lng &&
+                $job->delivery_lat &&
+                $job->delivery_lng
+            ) {
+
+                $miles = $this->calculateMiles(
+                    $job->pickup_lat,
+                    $job->pickup_lng,
+                    $job->delivery_lat,
+                    $job->delivery_lng
+                );
+            }
+
+            // ✅ Add new field
+            $job->distance_miles = $miles;
+
+            return $job;
+        });
 
         return response()->json([
             'status' => true,
@@ -325,7 +373,7 @@ class JobApiController extends Controller
 
         $jobs = Job::where('driver_id', $user->id)   // ✅ only this driver
             ->whereNotNull('broker_id')              // ✅ broker must exist
-            ->whereIn('status', ['assigned', 'in_progress', 'completed']) // ✅ assigned jobs only
+            ->whereIn('status', ['assigned', 'in_progress', 'completed', 'pending_approval', 'rejected']) // ✅ assigned jobs only
             ->latest()
             ->get();
 
@@ -336,74 +384,181 @@ class JobApiController extends Controller
     }
 
     public function sendJobRequest(Request $request, $jobId)
-    {
-        $user = $request->user();
+{
+    $user = $request->user();
 
-        // Only drivers allowed
-        if ($user->role !== 'driver') {
+    // Only drivers allowed
+    if ($user->role !== 'driver') {
+        return response()->json([
+            'status' => false,
+            'message' => 'Only drivers can send job requests',
+        ], 403);
+    }
+
+    // Check driver availability
+    if ($user->is_available != 1) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Driver is not available',
+        ], 400);
+    }
+
+    $job = Job::find($jobId);
+
+    if (! $job) {
+        return response()->json([
+            'status' => false,
+            'message' => 'Job not found',
+        ], 404);
+    }
+
+    // Make sure job is still available
+    if ($job->status !== 'open' || $job->driver_id !== null) {
+        return response()->json([
+            'status' => false,
+            'message' => 'This job is no longer available',
+        ], 400);
+    }
+
+    $now = now();
+    $expiresAt = $now->copy()->addMinutes(5);
+
+    try {
+        DB::beginTransaction();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Expire old pending requests of this driver
+        |--------------------------------------------------------------------------
+        */
+        JobRequest::where('driver_id', $user->id)
+            ->where('status', 'pending')
+            ->whereNotNull('expires_at')
+            ->where('expires_at', '<=', $now)
+            ->update([
+                'status' => 'expired',
+            ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Check active request limit
+        |--------------------------------------------------------------------------
+        */
+        $activeRequestsCount = JobRequest::where('driver_id', $user->id)
+            ->where('status', 'pending')
+            ->where(function ($query) use ($now) {
+                $query->whereNull('expires_at')
+                    ->orWhere('expires_at', '>', $now);
+            })
+            ->count();
+
+        if ($activeRequestsCount >= 15) {
+            DB::rollBack();
+
             return response()->json([
                 'status' => false,
-                'message' => 'Only drivers can send job requests',
-            ], 403);
-        }
-
-        // Check driver availability
-        if ($user->is_available != 1) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Driver is not available',
+                'message' => 'Max 15 active requests allowed',
             ], 400);
         }
 
-        // Check max active requests (3)
-        if ($user->active_requests_count >= 15) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Max 3 active requests allowed',
-            ], 400);
-        }
-
-        $job = Job::find($jobId);
-        if (! $job) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Job not found',
-            ], 404);
-        }
-
-        // Prevent duplicate request
-        $exists = JobRequest::where('job_id', $jobId)
+        /*
+        |--------------------------------------------------------------------------
+        | Check existing request for same driver and same job
+        |--------------------------------------------------------------------------
+        */
+        $jobRequest = JobRequest::where('job_id', $jobId)
             ->where('driver_id', $user->id)
+            ->lockForUpdate()
             ->first();
 
-        if ($exists) {
-            return response()->json([
-                'status' => false,
-                'message' => 'You already sent request for this job',
-            ], 400);
+        $isReactivated = false;
+
+        if ($jobRequest) {
+            $isStillActive = $jobRequest->status === 'pending'
+                && (
+                    is_null($jobRequest->expires_at)
+                    || Carbon::parse($jobRequest->expires_at)->gt($now)
+                );
+
+            // If request is still active, do not resend
+            if ($isStillActive) {
+                DB::rollBack();
+
+                return response()->json([
+                    'status' => false,
+                    'message' => 'You already have an active request for this job',
+                ], 400);
+            }
+
+            // If request already accepted/assigned, do not reactivate
+            if ($jobRequest->status === 'assigned') {
+                DB::rollBack();
+
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Your request for this job is already assigned',
+                ], 400);
+            }
+
+            /*
+            |--------------------------------------------------------------------------
+            | Reactivate existing expired request
+            |--------------------------------------------------------------------------
+            | No new row will be created here.
+            */
+            $jobRequest->update([
+                'status' => 'pending',
+                'note' => $request->note,
+                'expires_at' => $expiresAt,
+                'responded_at' => null,
+            ]);
+
+            $isReactivated = true;
+
+        } else {
+            /*
+            |--------------------------------------------------------------------------
+            | Create request only first time
+            |--------------------------------------------------------------------------
+            */
+            $jobRequest = JobRequest::create([
+                'job_id' => $jobId,
+                'driver_id' => $user->id,
+                'status' => 'pending',
+                'note' => $request->note,
+                'expires_at' => $expiresAt,
+            ]);
         }
 
-        // Request expires in 2 hours
-        $expiresAt = Carbon::now()->addHours(2);
+        /*
+        |--------------------------------------------------------------------------
+        | Update driver's active request count correctly
+        |--------------------------------------------------------------------------
+        */
+        $newActiveRequestsCount = JobRequest::where('driver_id', $user->id)
+            ->where('status', 'pending')
+            ->where(function ($query) {
+                $query->whereNull('expires_at')
+                    ->orWhere('expires_at', '>', now());
+            })
+            ->count();
 
-        // Create Job Request
-        $jobRequest = JobRequest::create([
-            'job_id' => $jobId,
-            'driver_id' => $user->id,
-            'status' => 'pending',
-            'note' => $request->note,
-            'expires_at' => $expiresAt,
+        $user->update([
+            'active_requests_count' => $newActiveRequestsCount,
         ]);
 
-        // Increase driver's active request count
-        $user->increment('active_requests_count');
-        // Notify broker
-        // Notify broker in database
+        DB::commit();
+
+        /*
+        |--------------------------------------------------------------------------
+        | Notify broker
+        |--------------------------------------------------------------------------
+        */
         Notification::create([
             'user_id' => $job->broker_id,
             'type' => 'job_request',
-            'title' => 'New Job Request',
-            'body' => $user->full_name.' requested your job',
+            'title' => $isReactivated ? 'Job Request Sent Again' : 'New Job Request',
+            'body' => $user->full_name . ' requested your job',
             'data' => json_encode([
                 'job_id' => $job->id,
                 'driver_id' => $user->id,
@@ -416,34 +571,49 @@ class JobApiController extends Controller
         $broker = User::find($job->broker_id);
 
         if ($broker && $broker->onesignal_player_id) {
-
             $oneSignal = new OneSignalService;
 
             $oneSignal->sendNotification(
                 $broker->onesignal_player_id,
-                'New Job Request',
-                $user->full_name.' requested your job: '.$job->title,
+                $isReactivated ? 'Job Request Sent Again' : 'New Job Request',
+                $user->full_name . ' requested your job: ' . $job->title,
                 [
                     'job_id' => $job->id,
                     'driver_id' => $user->id,
                     'job_request_id' => $jobRequest->id,
+                    'type' => 'job_request',
                 ]
             );
         }
 
         return response()->json([
             'status' => true,
-            'message' => 'Job request sent successfully',
+            'message' => $isReactivated
+                ? 'Job request activated again successfully'
+                : 'Job request sent successfully',
             'request' => [
                 'id' => $jobRequest->id,
                 'job_id' => $jobRequest->job_id,
                 'driver_id' => $jobRequest->driver_id,
                 'status' => $jobRequest->status,
-                // 'expires_at' => $expiresAt,
+                'expires_at' => $jobRequest->expires_at,
             ],
         ]);
-    }
 
+    } catch (\Exception $e) {
+        DB::rollBack();
+
+        Log::error('Send Job Request Error', [
+            'error' => $e->getMessage(),
+        ]);
+
+        return response()->json([
+            'status' => false,
+            'message' => 'Failed to send job request',
+            'error' => $e->getMessage(),
+        ], 500);
+    }
+}
     public function notifications(Request $request)
     {
         $notifications = Notification::where('user_id', $request->user()->id)
@@ -460,7 +630,7 @@ class JobApiController extends Controller
     {
         $user = $request->user();
 
-        // Only broker allowed
+        // 🔐 Only broker allowed
         if ($user->role !== 'broker') {
             return response()->json([
                 'status' => false,
@@ -468,7 +638,29 @@ class JobApiController extends Controller
             ], 403);
         }
 
+        /*
+        |--------------------------------------------------------------------------
+        | ⏰ Auto Expire Old Requests
+        |--------------------------------------------------------------------------
+        */
+        JobRequest::where('status', 'pending')
+            ->whereNotNull('expires_at')
+            ->where('expires_at', '<', now())
+            ->update([
+                'status' => 'expired',
+            ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | 📦 Fetch Active Requests
+        |--------------------------------------------------------------------------
+        */
         $requests = JobRequest::with(['job', 'driver'])
+            ->where('status', 'pending')
+            ->where(function ($query) {
+                $query->whereNull('expires_at')
+                    ->orWhere('expires_at', '>', now());
+            })
             ->whereHas('job', function ($query) use ($user) {
                 $query->where('broker_id', $user->id);
             })
@@ -629,6 +821,7 @@ class JobApiController extends Controller
             ], 500);
         }
     }
+
     public function getJobDocuments(Request $request, $jobId)
     {
         $user = $request->user();
@@ -1218,177 +1411,431 @@ class JobApiController extends Controller
         ]);
     }
 
+    public function rejectJob(Request $request, $jobId)
+    {
+        $user = $request->user();
 
-  public function rejectJob(Request $request, $jobId)
+        if ($user->role !== 'broker') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only broker can reject job',
+            ], 403);
+        }
+
+        $job = Job::findOrFail($jobId);
+
+        if ($job->broker_id !== $user->id) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
+
+        if ($job->status !== 'pending_approval') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Job is not pending approval',
+            ], 400);
+        }
+
+        $request->validate([
+            'reason' => 'nullable|string|max:500',
+        ]);
+
+        try {
+
+            $job->update([
+                'status' => 'rejected',
+            ]);
+
+            // 🔔 Save notification in DB
+            Notification::create([
+                'user_id' => $job->driver_id,
+                'type' => 'job_rejected',
+                'title' => 'Job Rejected',
+                'body' => 'Your job was rejected: '.$job->title,
+                'data' => json_encode([
+                    'job_id' => $job->id,
+                    'reason' => $request->reason,
+                ]),
+                'created_at' => now(),
+            ]);
+
+            // 🔔 Push Notification (OneSignal)
+            $driver = User::find($job->driver_id);
+
+            if ($driver && $driver->onesignal_player_id) {
+
+                $oneSignal = new OneSignalService;
+
+                $oneSignal->sendNotification(
+                    $driver->onesignal_player_id,
+                    'Job Rejected',
+                    'Your job was rejected: '.$job->title,
+                    [
+                        'job_id' => $job->id,
+                        'status' => 'rejected',
+                        'reason' => $request->reason,
+                    ]
+                );
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Job rejected successfully',
+                'reason' => $request->reason,
+            ]);
+
+        } catch (\Exception $e) {
+
+            \Log::error('Reject Job Error', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Rejection failed',
+            ], 500);
+        }
+    }
+
+    public function approveJob(Request $request, $jobId)
+    {
+        $user = $request->user();
+
+        if ($user->role !== 'broker') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only broker can approve job',
+            ], 403);
+        }
+
+        $job = Job::findOrFail($jobId);
+
+        if ($job->broker_id !== $user->id) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
+
+        if ($job->status !== 'pending_approval') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Job is not pending approval',
+            ], 400);
+        }
+
+        try {
+
+            $job->update([
+                'status' => 'completed',
+                'approved_at' => now(),
+            ]);
+
+            // 🔔 Save notification in DB
+            Notification::create([
+                'user_id' => $job->driver_id,
+                'type' => 'job_approved',
+                'title' => 'Job Approved',
+                'body' => 'Your job has been approved: '.$job->title,
+                'data' => json_encode([
+                    'job_id' => $job->id,
+                ]),
+                'created_at' => now(),
+            ]);
+
+            // 🔔 Push Notification (OneSignal)
+            $driver = User::find($job->driver_id);
+
+            if ($driver && $driver->onesignal_player_id) {
+
+                $oneSignal = new OneSignalService;
+
+                $oneSignal->sendNotification(
+                    $driver->onesignal_player_id,
+                    'Job Approved',
+                    'Your job has been approved: '.$job->title,
+                    [
+                        'job_id' => $job->id,
+                        'status' => 'completed',
+                    ]
+                );
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Job approved successfully',
+            ]);
+
+        } catch (\Exception $e) {
+
+            \Log::error('Approve Job Error', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Approval failed',
+            ], 500);
+        }
+    }
+
+    public function editJob(Request $request, $jobId)
+    {
+        $user = $request->user();
+
+        // 🔐 Only broker allowed
+        if ($user->role !== 'broker') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only brokers can edit jobs',
+            ], 403);
+        }
+
+        $job = Job::find($jobId);
+
+        if (! $job) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Job not found',
+            ], 404);
+        }
+
+        // 🔒 Ensure broker owns this job
+        if ($job->broker_id !== $user->id) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
+
+        // 🔒 Prevent editing after assignment
+        if ($job->status !== 'open') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only open jobs can be edited',
+            ], 400);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'title' => 'nullable|string|max:255',
+            'description' => 'nullable|string',
+            'pickup_address' => 'nullable|string',
+            'delivery_address' => 'nullable|string',
+            'scheduled_at' => 'nullable|date',
+            'payment_rate' => 'nullable|numeric',
+            'load_type' => 'nullable|string',
+            'load_weight' => 'nullable|numeric',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => $validator->errors(),
+            ], 422);
+        }
+
+        try {
+
+            $job->update([
+                'title' => $request->title ?? $job->title,
+                'description' => $request->description ?? $job->description,
+                'instructions' => $request->instructions ?? $job->instructions,
+
+                'pickup_address' => $request->pickup_address ?? $job->pickup_address,
+                'pickup_lat' => $request->pickup_lat ?? $job->pickup_lat,
+                'pickup_lng' => $request->pickup_lng ?? $job->pickup_lng,
+
+                'delivery_address' => $request->delivery_address ?? $job->delivery_address,
+                'delivery_lat' => $request->delivery_lat ?? $job->delivery_lat,
+                'delivery_lng' => $request->delivery_lng ?? $job->delivery_lng,
+
+                'scheduled_at' => $request->scheduled_at ?? $job->scheduled_at,
+                'payment_rate' => $request->payment_rate ?? $job->payment_rate,
+                'load_type' => $request->load_type ?? $job->load_type,
+                'load_weight' => $request->load_weight ?? $job->load_weight,
+            ]);
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Job updated successfully',
+                'job' => $job,
+            ]);
+
+        } catch (\Exception $e) {
+
+            Log::error('Edit Job Error', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to update job',
+            ], 500);
+        }
+    }
+
+    public function deleteJob(Request $request, $jobId)
+    {
+        $user = $request->user();
+
+        // 🔐 Only broker allowed
+        if ($user->role !== 'broker') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only brokers can delete jobs',
+            ], 403);
+        }
+
+        $job = Job::find($jobId);
+
+        if (! $job) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Job not found',
+            ], 404);
+        }
+
+        // 🔒 Ensure broker owns this job
+        if ($job->broker_id !== $user->id) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
+
+        // 🔒 Prevent deleting assigned/in-progress/completed jobs
+        if ($job->status !== 'open') {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only open jobs can be deleted',
+            ], 400);
+        }
+
+        try {
+
+            // ❌ Delete related job requests
+            JobRequest::where('job_id', $job->id)->delete();
+
+            // ❌ Delete related payments if exists
+            Payment::where('job_id', $job->id)->delete();
+
+            // ❌ Delete job
+            $job->delete();
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Job deleted successfully',
+            ]);
+
+        } catch (\Exception $e) {
+
+            Log::error('Delete Job Error', [
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Failed to delete job',
+            ], 500);
+        }
+    }
+
+
+    public function getNotifications(Request $request)
 {
     $user = $request->user();
 
-    if ($user->role !== 'broker') {
+    // Only broker and driver can view notifications
+    if (! in_array($user->role, ['broker', 'driver'])) {
         return response()->json([
             'status' => false,
-            'message' => 'Only broker can reject job',
+            'message' => 'Unauthorized role',
         ], 403);
     }
 
-    $job = Job::findOrFail($jobId);
+    $notifications = Notification::where('user_id', $user->id)
+        ->latest()
+        ->get()
+        ->map(function ($notification) {
+            return [
+                'id' => $notification->id,
+                'type' => $notification->type,
+                'title' => $notification->title,
+                'body' => $notification->body,
+                'data' => $notification->data
+                    ? json_decode($notification->data, true)
+                    : null,
+                'created_at' => $notification->created_at,
+            ];
+        });
 
-    if ($job->broker_id !== $user->id) {
+    return response()->json([
+        'status' => true,
+        'message' => 'Notifications fetched successfully',
+        'role' => $user->role,
+        'notifications' => $notifications,
+    ]);
+}
+
+
+public function deleteNotifications(Request $request)
+{
+    $user = $request->user();
+
+    // Only broker and driver can delete notifications
+    if (! in_array($user->role, ['broker', 'driver'])) {
         return response()->json([
             'status' => false,
-            'message' => 'Unauthorized',
+            'message' => 'Unauthorized role',
         ], 403);
     }
 
-    if ($job->status !== 'pending_approval') {
+    $clearAll = $request->boolean('clear_all');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Clear All Notifications
+    |--------------------------------------------------------------------------
+    */
+    if ($clearAll) {
+        $deletedCount = Notification::where('user_id', $user->id)->delete();
+
         return response()->json([
-            'status' => false,
-            'message' => 'Job is not pending approval',
-        ], 400);
+            'status' => true,
+            'message' => 'All notifications deleted successfully',
+            'deleted_count' => $deletedCount,
+        ]);
     }
 
-    $request->validate([
-        'reason' => 'nullable|string|max:500'
+    /*
+    |--------------------------------------------------------------------------
+    | Delete Single / Multiple Notifications
+    |--------------------------------------------------------------------------
+    */
+    $validator = Validator::make($request->all(), [
+        'notification_ids' => 'required|array|min:1',
+        'notification_ids.*' => 'required|integer|distinct',
     ]);
 
-    try {
-
-        $job->update([
-            'status' => 'rejected',
-        ]);
-
-        // 🔔 Save notification in DB
-        Notification::create([
-            'user_id' => $job->driver_id,
-            'type' => 'job_rejected',
-            'title' => 'Job Rejected',
-            'body' => 'Your job was rejected: ' . $job->title,
-            'data' => json_encode([
-                'job_id' => $job->id,
-                'reason' => $request->reason,
-            ]),
-            'created_at' => now(),
-        ]);
-
-        // 🔔 Push Notification (OneSignal)
-        $driver = User::find($job->driver_id);
-
-        if ($driver && $driver->onesignal_player_id) {
-
-            $oneSignal = new OneSignalService;
-
-            $oneSignal->sendNotification(
-                $driver->onesignal_player_id,
-                'Job Rejected',
-                'Your job was rejected: ' . $job->title,
-                [
-                    'job_id' => $job->id,
-                    'status' => 'rejected',
-                    'reason' => $request->reason,
-                ]
-            );
-        }
-
-        return response()->json([
-            'status' => true,
-            'message' => 'Job rejected successfully',
-            'reason' => $request->reason,
-        ]);
-
-    } catch (\Exception $e) {
-
-        \Log::error('Reject Job Error', [
-            'error' => $e->getMessage(),
-        ]);
-
+    if ($validator->fails()) {
         return response()->json([
             'status' => false,
-            'message' => 'Rejection failed',
-        ], 500);
+            'message' => $validator->errors(),
+        ], 422);
     }
+
+    $notificationIds = $request->notification_ids;
+
+    $deletedCount = Notification::where('user_id', $user->id)
+        ->whereIn('id', $notificationIds)
+        ->delete();
+
+    return response()->json([
+        'status' => true,
+        'message' => 'Notifications deleted successfully',
+        'deleted_count' => $deletedCount,
+    ]);
 }
-
-
-public function approveJob(Request $request, $jobId)
-{
-    $user = $request->user();
-
-    if ($user->role !== 'broker') {
-        return response()->json([
-            'status' => false,
-            'message' => 'Only broker can approve job',
-        ], 403);
-    }
-
-    $job = Job::findOrFail($jobId);
-
-    if ($job->broker_id !== $user->id) {
-        return response()->json([
-            'status' => false,
-            'message' => 'Unauthorized',
-        ], 403);
-    }
-
-    if ($job->status !== 'pending_approval') {
-        return response()->json([
-            'status' => false,
-            'message' => 'Job is not pending approval',
-        ], 400);
-    }
-
-    try {
-
-        $job->update([
-            'status' => 'completed',
-            'approved_at' => now(),
-        ]);
-
-        // 🔔 Save notification in DB
-        Notification::create([
-            'user_id' => $job->driver_id,
-            'type' => 'job_approved',
-            'title' => 'Job Approved',
-            'body' => 'Your job has been approved: ' . $job->title,
-            'data' => json_encode([
-                'job_id' => $job->id,
-            ]),
-            'created_at' => now(),
-        ]);
-
-        // 🔔 Push Notification (OneSignal)
-        $driver = User::find($job->driver_id);
-
-        if ($driver && $driver->onesignal_player_id) {
-
-            $oneSignal = new OneSignalService;
-
-            $oneSignal->sendNotification(
-                $driver->onesignal_player_id,
-                'Job Approved',
-                'Your job has been approved: ' . $job->title,
-                [
-                    'job_id' => $job->id,
-                    'status' => 'completed',
-                ]
-            );
-        }
-
-        return response()->json([
-            'status' => true,
-            'message' => 'Job approved successfully',
-        ]);
-
-    } catch (\Exception $e) {
-
-        \Log::error('Approve Job Error', [
-            'error' => $e->getMessage(),
-        ]);
-
-        return response()->json([
-            'status' => false,
-            'message' => 'Approval failed',
-        ], 500);
-    }
-}
-
-
 }

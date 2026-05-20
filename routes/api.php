@@ -6,6 +6,8 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AppAuthController;
 use App\Http\Controllers\Api\ReviewController;
 use App\Http\Controllers\Api\JobApiController;
+use App\Http\Controllers\BrokerStatController;
+
 
 
 
@@ -57,6 +59,31 @@ Route::middleware('auth:sanctum')->post('/jobs/{jobId}/submit-documents', [JobAp
 Route::middleware('auth:sanctum')->get('/broker/pending-approval-jobs', [JobApiController::class, 'pendingApprovalJobs']);
 Route::middleware('auth:sanctum')->post('/jobs/{jobId}/approve', [JobApiController::class, 'approveJob']);
 Route::middleware('auth:sanctum')->post('/jobs/{jobId}/reject', [JobApiController::class, 'rejectJob']);
+Route::middleware('auth:sanctum')->get('/notifications', [JobApiController::class, 'getNotifications']);
+Route::middleware('auth:sanctum')->post('/notifications/delete', [JobApiController::class, 'deleteNotifications']);
+
+Route::middleware('auth:sanctum')->get('/broker-dashboard-stats',[BrokerStatController::class, 'brokerDashboardStats']);
+Route::middleware('auth:sanctum')->get('/driver/dashboard-stats', [BrokerStatController::class, 'driverDashboardStats']);
+Route::middleware('auth:sanctum')->post('/company-profile/save', [BrokerStatController::class, 'saveCompanyProfile']);
+Route::middleware('auth:sanctum')->get('/broker/profile', [BrokerStatController::class, 'brokerProfile']);
+Route::middleware('auth:sanctum')->group(function () {
+
+    // Edit Job
+    Route::put('/jobs/{jobId}/edit', [JobApiController::class, 'editJob']);
+
+    // Delete Job
+    Route::delete('/jobs/{jobId}/delete', [JobApiController::class, 'deleteJob']);
+
+});
+
+Route::middleware('auth:sanctum')->group(function () {
+
+    Route::get(
+        '/broker/drivers',
+        [BrokerStatController::class, 'brokerDrivers']
+    );
+
+});
 // ─────────────────────────────────
 // Password Reset (no auth required)
 // ─────────────────────────────────
